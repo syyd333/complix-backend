@@ -4,6 +4,6 @@ pydantic
 python-multipart
 numpy
 opencv-python-headless
-easyocr
+pytesseract
 reportlab
 sqlalchemy

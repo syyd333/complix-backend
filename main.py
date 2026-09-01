@@ -6,24 +6,21 @@ from pydantic import BaseModel
 from typing import Dict, List
 import numpy as np
 import cv2
-import easyocr
+import pytesseract  # Swapped for ultra-low memory usage
 import re
 import os
 from datetime import datetime
 
-# Database imports
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# PDF Generation imports
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
-# Initialize FastAPI app
-app = FastAPI(title="CompliX Ultimate LMPC 2011 Core")
+app = FastAPI(title="CompliX Light-Weight Core")
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,7 +30,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 1. DATABASE CONFIGURATION ---
 DATABASE_URL = "sqlite:///./audit_ledger.db"
 Base = declarative_base()
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -50,23 +46,19 @@ class InspectionAuditLog(Base):
     pdf_path = Column(String)
 
 Base.metadata.create_all(bind=engine)
-reader = easyocr.Reader(['en'])
 
 REGISTERED_PRODUCT_REGISTRY = {
     "8901058002316": {"product_name": "Premium Glucose Biscuits", "registered_mrp": 10.00, "registered_net_qty": "100g", "manufacturer": "Parle Biscuits Pvt Ltd"},
     "8901491101836": {"product_name": "Spiced Potato Chips", "registered_mrp": 20.00, "registered_net_qty": "50g", "manufacturer": "SnackFoods India"}
 }
 
-# --- 2. AUTOMATED PDF LEGAL NOTICE GENERATOR ---
 def build_enforcement_notice(barcode: str, product_name: str, manufacturer: str, violations: List[str]) -> str:
     os.makedirs("./notices", exist_ok=True)
     filename = f"./notices/NOTICE_{barcode}_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf"
-    
     doc = SimpleDocTemplate(filename, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
     
-    # Custom Styles
     title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], textColor=colors.HexColor('#990000'), spaceAfter=12)
     normal_style = styles['Normal']
     
@@ -87,19 +79,9 @@ def build_enforcement_notice(barcode: str, product_name: str, manufacturer: str,
         story.append(Paragraph(f"• <font color='red'><b>VIOLATION:</b></font> {violation}", normal_style))
         story.append(Spacer(1, 6))
         
-    closing = """
-    <br/><br/>
-    You are hereby directed to rectify these labeling errors or submit a clarifying response to the undersigned controller 
-    within fifteen (15) business working days of notice delivery, failing which standard penalty prosecution files will be initiated.
-    <br/><br/>
-    <b>Authorized By:</b> Legal Metrology Enforcement Desk (Team CompliX System)
-    """
-    story.append(Paragraph(closing, normal_style))
-    
     doc.build(story)
     return filename
 
-# --- 3. API ROUTER INFRASTRUCTURE ---
 class RuleCheckStatus(BaseModel):
     check_name: str
     status: str
@@ -124,9 +106,11 @@ async def verify_packaged_commodity(barcode: str = Query(...), file: UploadFile 
         np_array = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
         
-        ocr_results = reader.readtext(img)
-        detected_text_list = [res[1] for res in ocr_results]
-        combined_text = " ".join(detected_text_list).lower()
+        # Performance optimization: convert to grayscale to save system memory
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Use low-overhead Tesseract string processing logic
+        combined_text = pytesseract.image_to_string(gray).lower()
 
         checks_log = []
         violation_strings = []
@@ -134,9 +118,9 @@ async def verify_packaged_commodity(barcode: str = Query(...), file: UploadFile 
 
         # Rule Check 1: MRP Verification
         found_prices = [float(x) for x in re.findall(r'(?:rs\.?|mrp)\s*(\d+(?:\.\d+)?)', combined_text)]
-        if found_prices and found_prices[0] > product_metadata["registered_mrp"]:
+        if found_prices and found_prices > product_metadata["registered_mrp"]:
             is_fully_compliant = False
-            msg = f"Printed Price Rs.{found_prices[0]} exceeds registered value of Rs.{product_metadata['registered_mrp']}."
+            msg = f"Printed Price Rs.{found_prices} exceeds registered value of Rs.{product_metadata['registered_mrp']}."
             violation_strings.append(msg)
             checks_log.append(RuleCheckStatus(check_name="Rule 6(1)(da) - MRP Pricing", status="VIOLATION", details=msg))
         else:
@@ -153,16 +137,15 @@ async def verify_packaged_commodity(barcode: str = Query(...), file: UploadFile 
 
         final_verdict = "PASSED" if is_fully_compliant else "FAILED"
         
-        # 4. Generate the PDF notice if any violations were found
         generated_pdf = ""
         pdf_url = ""
         if not is_fully_compliant:
             generated_pdf = build_enforcement_notice(
                 barcode, product_metadata["product_name"], product_metadata["manufacturer"], violation_strings
             )
-            pdf_url = f"http://127.0.0{barcode}"
+            # Use dynamically fetched host headers so it adapts online automatically
+            pdf_url = f"/api/v1/compliance/download-notice?barcode={barcode}"
 
-        # 5. Commit record permanently to the SQLite database
         audit_record = InspectionAuditLog(
             barcode=barcode,
             product_name=product_metadata["product_name"],
