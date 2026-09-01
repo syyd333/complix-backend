@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 pydantic
-python-multipart
+python-multipart==0.0.12
 numpy
 opencv-python-headless
 pytesseract

@@ -1,4 +1,6 @@
 import uvicorn
+# Force generation of target directories to prevent Status 1 storage bugs
+os.makedirs("./notices", exist_ok=True)
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -212,3 +214,73 @@ async def verify_packaged_commodity(barcode: str = Query(...), file: UploadFile 
             checks_log.append(RuleCheckStatus(check_name="Rule 6(1)(c) - Net Quantity Consistency", status="PASSED", details=f"Net content weight declaration ({product_metadata['registered_net_qty']}) matches database values."))
         else:
             is_fully_compliant = False
+            msg = f"Package text validation failed. Expected net weight string ({product_metadata['registered_net_qty']}) was missing from view."
+            violation_strings.append(msg)
+            checks_log.append(RuleCheckStatus(check_name="Rule 6(1)(c) - Net Quantity Consistency", status="VIOLATION", details=msg))
+
+        final_verdict = "PASSED" if is_fully_compliant else "FAILED"
+        generated_pdf = ""
+        pdf_url = ""
+        if not is_fully_compliant:
+            generated_pdf = build_enforcement_notice(
+                barcode,
+                product_metadata["product_name"],
+                product_metadata["manufacturer"],
+                violation_strings,
+            )
+            pdf_url = f"/api/v1/compliance/download-notice?barcode={barcode}"
+
+        audit_record = InspectionAuditLog(
+            barcode=barcode,
+            product_name=product_metadata["product_name"],
+            status=final_verdict,
+            infractions="; ".join(violation_strings),
+            pdf_path=generated_pdf,
+        )
+        db.add(audit_record)
+        db.commit()
+
+        return BarcodeComplianceReport(
+            barcode_found=barcode,
+            product_identified=product_metadata["product_name"],
+            overall_compliance=final_verdict,
+            executed_checks=checks_log,
+            pdf_download_url=pdf_url,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Engine classification fault: {str(e)}")
+    finally:
+        db.close()
+
+
+@app.get("/")
+def serve_enforcement_portal():
+    html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
+    return FileResponse(html_path, media_type="text/html")
+
+
+@app.get("/api/v1/compliance/download-notice")
+def download_notice(barcode: str):
+    db = SessionLocal()
+    try:
+        record = (
+            db.query(InspectionAuditLog)
+            .filter(InspectionAuditLog.barcode == barcode)
+            .order_by(InspectionAuditLog.id.desc())
+            .first()
+        )
+        if record and record.pdf_path and os.path.exists(record.pdf_path):
+            return FileResponse(
+                record.pdf_path,
+                media_type="application/pdf",
+                filename=os.path.basename(record.pdf_path),
+            )
+        raise HTTPException(status_code=404, detail="No violation notice report found for this product.")
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
