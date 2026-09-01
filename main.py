@@ -1,6 +1,5 @@
+import os
 import uvicorn
-# Force generation of target directories to prevent Status 1 storage bugs
-os.makedirs("./notices", exist_ok=True)
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -10,7 +9,6 @@ import numpy as np
 import cv2
 import pytesseract
 import re
-import os
 from datetime import datetime
 
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text
